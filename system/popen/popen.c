@@ -45,16 +45,64 @@
  * Private Types
  ****************************************************************************/
 
-/* struct popen_file_s is a cast compatible version of FILE that contains
- * the additional PID of the shell processes needed by pclose().
- */
-
 struct popen_file_s
 {
-  FILE copy;
-  FILE *original;
+  int fd;
   pid_t shell;
 };
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: popen_file_read
+ ****************************************************************************/
+
+static ssize_t popen_file_read(FAR void *cookie, FAR char *buf,
+                               size_t size)
+{
+  FAR struct popen_file_s *filep = (FAR struct popen_file_s *)cookie;
+
+  return read(filep->fd, buf, size);
+}
+
+/****************************************************************************
+ * Name: popen_file_write
+ ****************************************************************************/
+
+static ssize_t popen_file_write(FAR void *cookie, FAR const char *buf,
+                                size_t size)
+{
+  FAR struct popen_file_s *filep = (FAR struct popen_file_s *)cookie;
+
+  return write(filep->fd, buf, size);
+}
+
+/****************************************************************************
+ * Name: popen_file_seek
+ ****************************************************************************/
+
+static off_t popen_file_seek(FAR void *cookie, FAR off_t *offset,
+                             int whence)
+{
+  set_errno(ESPIPE);
+  return ERROR;
+}
+
+/****************************************************************************
+ * Name: popen_file_close
+ ****************************************************************************/
+
+static int popen_file_close(FAR void *cookie)
+{
+  FAR struct popen_file_s *filep = (FAR struct popen_file_s *)cookie;
+  int ret;
+
+  ret = close(filep->fd);
+  free(filep);
+  return ret;
+}
 
 /****************************************************************************
  * Public Functions
@@ -115,6 +163,15 @@ struct popen_file_s
 FILE *popen(FAR const char *command, FAR const char *mode)
 {
   FAR struct popen_file_s *container;
+  FAR FILE *stream;
+  cookie_io_functions_t popen_io =
+    {
+      .read  = popen_file_read,
+      .write = popen_file_write,
+      .seek  = popen_file_seek,
+      .close = popen_file_close
+    };
+
   struct sched_param param;
   posix_spawnattr_t attr;
   posix_spawn_file_actions_t file_actions;
@@ -193,8 +250,9 @@ FILE *popen(FAR const char *command, FAR const char *mode)
 
   /* Create the FILE stream return reference */
 
-  container->original = fdopen(retfd, mode);
-  if (container->original == NULL)
+  container->fd = retfd;
+  stream = fopencookie(container, mode, popen_io);
+  if (stream == NULL)
     {
       errcode = errno;
       goto errout_with_pipe;
@@ -329,10 +387,7 @@ FILE *popen(FAR const char *command, FAR const char *mode)
       ioctl(retfd, FIOCLEX, 0);
     }
 
-  /* Finale and return input input/output stream */
-
-  memcpy(&container->copy, container->original, sizeof(FILE));
-  return &container->copy;
+  return stream;
 
 errout_with_actions:
   posix_spawn_file_actions_destroy(&file_actions);
@@ -341,14 +396,18 @@ errout_with_attrs:
   posix_spawnattr_destroy(&attr);
 
 errout_with_stream:
-  fclose(container->original);
+  fclose(stream);
+  container = NULL;
 
 errout_with_pipe:
   close(fd[0]);
   close(fd[1]);
 
 errout_with_container:
-  free(container);
+  if (container != NULL)
+    {
+      free(container);
+    }
 
 errout:
   errno = errcode;
@@ -399,31 +458,30 @@ errout:
 
 int pclose(FILE *stream)
 {
-  FAR struct popen_file_s *container = (FAR struct popen_file_s *)stream;
-  FILE *original;
+  FAR struct popen_file_s *container;
   pid_t shell;
 #ifdef CONFIG_SCHED_WAITPID
   int status;
   int result;
 #endif
 
-  DEBUGASSERT(container != NULL && container->original != NULL);
-  original = container->original;
+  DEBUGASSERT(stream != NULL);
 
-  /* Set the state of the original file descriptor to the state of the
-   * working copy
-   */
+  if (stream == NULL || stream->fs_iofunc.close != popen_file_close)
+    {
+      errno = EINVAL;
+      return ERROR;
+    }
 
-  memcpy(original, &container->copy, sizeof(FILE));
-
-  /* Then close the original and free the container (saving the PID of the
-   * shell process)
-   */
-
-  fclose(original);
+  container = (FAR struct popen_file_s *)stream->fs_cookie;
+  if (container == NULL)
+    {
+      errno = EINVAL;
+      return ERROR;
+    }
 
   shell = container->shell;
-  free(container);
+  fclose(stream);
 
 #ifdef CONFIG_SCHED_WAITPID
   /* Wait for the shell to exit, retrieving the return value if available. */
