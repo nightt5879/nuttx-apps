@@ -1,0 +1,12 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_POPEN_TEST
+	tristate "popen() test"
+	default n
+	depends on SYSTEM_POPEN
+	depends on !NSH_DISABLE_ECHO
+	---help---
+		Test reading from popen() streams and closing them with pclose().
