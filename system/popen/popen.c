@@ -97,11 +97,37 @@ static off_t popen_file_seek(FAR void *cookie, FAR off_t *offset,
 static int popen_file_close(FAR void *cookie)
 {
   FAR struct popen_file_s *filep = (FAR struct popen_file_s *)cookie;
+  int errcode = OK;
   int ret;
+#ifdef CONFIG_SCHED_WAITPID
+  int status;
+#endif
 
   ret = close(filep->fd);
+  if (ret < 0)
+    {
+      errcode = errno;
+    }
+
+#ifdef CONFIG_SCHED_WAITPID
+  if (filep->shell > 0)
+    {
+      ret = waitpid(filep->shell, &status, 0);
+      if (ret < 0 && errcode == OK)
+        {
+          errcode = errno;
+        }
+    }
+#endif
+
   free(filep);
-  return ret;
+  if (errcode != OK)
+    {
+      errno = errcode;
+      return ERROR;
+    }
+
+  return OK;
 }
 
 /****************************************************************************
@@ -193,6 +219,8 @@ FILE *popen(FAR const char *command, FAR const char *mode)
       goto errout;
     }
 
+  container->shell = ERROR;
+
   oldfd[1] = 0;
   newfd[1] = 0;
 
@@ -245,7 +273,7 @@ FILE *popen(FAR const char *command, FAR const char *mode)
   else
     {
       errcode = EINVAL;
-      goto errout_with_pipe;
+      goto errout_with_container;
     }
 
   /* Create the FILE stream return reference */
@@ -397,17 +425,20 @@ errout_with_attrs:
 
 errout_with_stream:
   fclose(stream);
-  container = NULL;
+  close(newfd[0]);
+  if (rw && newfd[0] != newfd[1])
+    {
+      close(newfd[1]);
+    }
+
+  goto errout;
 
 errout_with_pipe:
   close(fd[0]);
   close(fd[1]);
 
 errout_with_container:
-  if (container != NULL)
-    {
-      free(container);
-    }
+  free(container);
 
 errout:
   errno = errcode;
@@ -458,44 +489,5 @@ errout:
 
 int pclose(FILE *stream)
 {
-  FAR struct popen_file_s *container;
-  pid_t shell;
-#ifdef CONFIG_SCHED_WAITPID
-  int status;
-  int result;
-#endif
-
-  DEBUGASSERT(stream != NULL);
-
-  if (stream == NULL || stream->fs_iofunc.close != popen_file_close)
-    {
-      errno = EINVAL;
-      return ERROR;
-    }
-
-  container = (FAR struct popen_file_s *)stream->fs_cookie;
-  if (container == NULL)
-    {
-      errno = EINVAL;
-      return ERROR;
-    }
-
-  shell = container->shell;
-  fclose(stream);
-
-#ifdef CONFIG_SCHED_WAITPID
-  /* Wait for the shell to exit, retrieving the return value if available. */
-
-  result = waitpid(shell, &status, 0);
-  if (result < 0)
-    {
-      /* The errno has already been set */
-
-      return ERROR;
-    }
-
-  return status;
-#else
-  return OK;
-#endif
+  return fclose(stream);
 }
